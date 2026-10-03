@@ -1,0 +1,115 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: music21
+      POSTGRES_USER: music
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-music}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - music21-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U music -d music21"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-music21}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-music21secret}
+      MINIO_API_CORS_ALLOW_ORIGIN: ${APP_ORIGIN:-http://127.0.0.1:8080},http://127.0.0.1:5173
+    ports:
+      - "${S3_BIND_ADDRESS:-127.0.0.1}:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - music21-minio:/data
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      ACCESS_KEY: ${S3_ACCESS_KEY_ID:-music21}
+      SECRET_KEY: ${S3_SECRET_ACCESS_KEY:-music21secret}
+      BUCKET: ${S3_BUCKET:-music21-private}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      [
+        'until mc alias set local http://minio:9000 "$$ACCESS_KEY" "$$SECRET_KEY"; do sleep 1; done; mc mb --ignore-existing "local/$$BUCKET" && mc anonymous set none "local/$$BUCKET"',
+      ]
+  migrate:
+    profiles: ["app"]
+    build:
+      context: .
+      target: server
+    command: ["npm", "run", "db:migrate"]
+    environment: &backend
+      DATABASE_URL: postgres://music:${POSTGRES_PASSWORD:-music}@postgres:5432/music21
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://127.0.0.1:9000}
+      S3_REGION: us-east-1
+      S3_BUCKET: ${S3_BUCKET:-music21-private}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-music21}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-music21secret}
+      WEB_ORIGIN: ${APP_ORIGIN:-http://127.0.0.1:8080}
+      NODE_ENV: ${NODE_ENV:-development}
+      HOST: 0.0.0.0
+      PORT: 3001
+      TRUST_PROXY: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+  api:
+    profiles: ["app"]
+    build:
+      context: .
+      target: server
+    restart: unless-stopped
+    environment: *backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/api/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  worker:
+    profiles: ["app"]
+    build:
+      context: .
+      target: server
+    command: ["npm", "run", "worker"]
+    restart: unless-stopped
+    environment: *backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+  web:
+    profiles: ["app"]
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+volumes:
+  music21-postgres:
+  music21-minio:

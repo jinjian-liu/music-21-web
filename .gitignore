@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.vite/
+coverage/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+work/
+work-docx-env/
+
+playwright-report/
+test-results/

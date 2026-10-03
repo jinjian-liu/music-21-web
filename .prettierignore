@@ -1,0 +1,9 @@
+node_modules
+dist
+package-lock.json
+test-results
+playwright-report
+work
+work-docx-env
+public
+docs/*.docx
