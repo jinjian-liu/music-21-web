@@ -124,7 +124,7 @@ export function PracticePage() {
         </Empty>
       ) : !list.length ? (
         <Empty title="第一份记录，等你开始">
-          <p>在工作台选择“伴奏跟练”，播放后点击结束练习即可保存。</p>
+          <p>在工作台选择“伴奏跟练”或“逐音跟练”，结束练习后即可保存。</p>
           <Link to="/midi/demo" className="button primary">
             开始练习
           </Link>
@@ -138,7 +138,13 @@ export function PracticePage() {
                 <h3>{s.title}</h3>
                 <p>
                   {new Date(s.startedAt).toLocaleString("zh-CN")} ·{" "}
-                  {s.mode === "single-note" ? "单音练习" : "伴奏跟练"}
+                  {
+                    {
+                      "single-note": "单音练习",
+                      practice: "伴奏跟练",
+                      step: "逐音跟练",
+                    }[s.mode]
+                  }
                 </p>
               </div>
               <div>

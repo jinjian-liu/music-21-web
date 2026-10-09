@@ -16,6 +16,7 @@ interface VirtualKeyboardProps {
   activeNotes: Set<number>;
   highlightedNotes?: Set<number>;
   disabled?: boolean;
+  stopSignal?: number;
   onNoteOn: (note: KeyboardNote, source: "computer" | "pointer") => void;
   onNoteOff: (note: KeyboardNote) => void;
 }
@@ -31,11 +32,13 @@ export function VirtualKeyboard({
   activeNotes,
   highlightedNotes = new Set(),
   disabled = false,
+  stopSignal = 0,
   onNoteOn,
   onNoteOff,
 }: VirtualKeyboardProps) {
   const engineRef = useRef<PianoEngine | null>(null);
   const heldKeys = useRef(new Map<string, KeyboardNote>());
+  const physicalNotes = useRef(new Map<string, KeyboardNote>());
   const sustainedNotes = useRef(new Map<number, KeyboardNote>());
   const sustainRef = useRef(false);
   const [tone, setTone] = useState<PianoTone>("grand");
@@ -66,10 +69,20 @@ export function VirtualKeyboard({
     return engineRef.current;
   }
 
-  function attack(note: KeyboardNote, source: "computer" | "pointer") {
-    if (disabled || activeNotes.has(note.midi)) return;
+  function attack(
+    note: KeyboardNote,
+    source: "computer" | "pointer",
+    id: string,
+  ) {
+    if (disabled || physicalNotes.current.has(id)) return;
+    const alreadyHeld = [...physicalNotes.current.values()].some(
+      (n) => n.midi === note.midi,
+    );
+    physicalNotes.current.set(id, note);
+    if (alreadyHeld) return;
     sustainedNotes.current.delete(note.midi);
     const audio = engine();
+    audio.release(note.midi, 0.025);
     audio.setTone(tone);
     audio.setVolume(volume / 100);
     audio.setResonance(resonance / 100);
@@ -79,7 +92,12 @@ export function VirtualKeyboard({
     onNoteOn(note, source);
   }
 
-  function release(note: KeyboardNote) {
+  function release(id: string) {
+    const note = physicalNotes.current.get(id);
+    if (!note) return;
+    physicalNotes.current.delete(id);
+    if ([...physicalNotes.current.values()].some((n) => n.midi === note.midi))
+      return;
     if (sustainRef.current) {
       sustainedNotes.current.set(note.midi, note);
       return;
@@ -98,9 +116,36 @@ export function VirtualKeyboard({
     sustainedNotes.current.clear();
   }
 
+  function silence(clearPhysical = false) {
+    const notes = new Set([
+      ...activeNotes,
+      ...[
+        ...physicalNotes.current.values(),
+        ...sustainedNotes.current.values(),
+      ].map((note) => note.midi),
+    ]);
+    if (clearPhysical) {
+      heldKeys.current.clear();
+      physicalNotes.current.clear();
+    }
+    sustainedNotes.current.clear();
+    sustainRef.current = false;
+    setSustain(false);
+    engineRef.current?.releaseAll();
+    notes.forEach((midi) => {
+      const note = keyboardNotes.find((item) => item.midi === midi);
+      if (note) onNoteOff(note);
+    });
+  }
+
   useEffect(() => {
     const keyDown = (event: KeyboardEvent) => {
-      if (disabled || event.ctrlKey || event.metaKey || event.isComposing)
+      if (
+        disabled ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.isComposing
+      )
         return;
       if (
         event.target instanceof HTMLElement &&
@@ -128,10 +173,11 @@ export function VirtualKeyboard({
         physicalKey,
         event.shiftKey || event.altKey,
       );
-      if (!note || heldKeys.current.has(event.code)) return;
+      if (!note) return;
       event.preventDefault();
+      if (event.repeat || heldKeys.current.has(event.code)) return;
       heldKeys.current.set(event.code, note);
-      attack(note, "computer");
+      attack(note, "computer", event.code);
     };
     const keyUp = (event: KeyboardEvent) => {
       if (event.code === "Space" && sustainRef.current) {
@@ -142,41 +188,33 @@ export function VirtualKeyboard({
       const note = heldKeys.current.get(event.code);
       if (!note) return;
       heldKeys.current.delete(event.code);
-      release(note);
+      release(event.code);
     };
     const releaseEverything = () => {
-      heldKeys.current.clear();
-      sustainedNotes.current.clear();
-      sustainRef.current = false;
-      setSustain(false);
-      engineRef.current?.releaseAll();
-      activeNotes.forEach((midi) => {
-        const note = keyboardNotes.find((item) => item.midi === midi);
-        if (note) onNoteOff(note);
-      });
+      silence(true);
+    };
+    const visibility = () => {
+      if (document.hidden) releaseEverything();
     };
     window.addEventListener("keydown", keyDown);
     window.addEventListener("keyup", keyUp);
     window.addEventListener("blur", releaseEverything);
+    document.addEventListener("visibilitychange", visibility);
     return () => {
       window.removeEventListener("keydown", keyDown);
       window.removeEventListener("keyup", keyUp);
       window.removeEventListener("blur", releaseEverything);
+      document.removeEventListener("visibilitychange", visibility);
     };
   });
 
   useEffect(() => () => engineRef.current?.dispose(), []);
   useEffect(() => {
+    silence();
+  }, [stopSignal]);
+  useEffect(() => {
     if (disabled) {
-      engineRef.current?.releaseAll();
-      heldKeys.current.clear();
-      sustainedNotes.current.clear();
-      sustainRef.current = false;
-      setSustain(false);
-      activeNotes.forEach((midi) => {
-        const note = keyboardNotes.find((n) => n.midi === midi);
-        if (note) onNoteOff(note);
-      });
+      silence();
     }
   }, [disabled]);
 
@@ -256,10 +294,15 @@ export function VirtualKeyboard({
                 key={note.midi}
                 onPointerDown={(event) => {
                   event.currentTarget.setPointerCapture(event.pointerId);
-                  attack(note, "pointer");
+                  attack(note, "pointer", `pointer:${event.pointerId}`);
                 }}
-                onPointerUp={() => release(note)}
-                onPointerCancel={() => release(note)}
+                onPointerUp={(event) => release(`pointer:${event.pointerId}`)}
+                onPointerCancel={(event) =>
+                  release(`pointer:${event.pointerId}`)
+                }
+                onLostPointerCapture={(event) =>
+                  release(`pointer:${event.pointerId}`)
+                }
                 type="button"
               >
                 <span>{note.key.toUpperCase()}</span>
@@ -267,17 +310,23 @@ export function VirtualKeyboard({
               </button>
             ))}
           </div>
-          <div className="black-keys" aria-hidden="true">
+          <div className="black-keys">
             {blackKeyboardNotes.map((note) => (
               <button
+                aria-label={`${note.name}，键盘 ${displayPerformanceKey(note)}`}
                 className={`piano-key black${activeNotes.has(note.midi) ? " pressed" : ""}${highlightedNotes.has(note.midi) ? " guided" : ""}`}
                 key={note.midi}
                 onPointerDown={(event) => {
                   event.currentTarget.setPointerCapture(event.pointerId);
-                  attack(note, "pointer");
+                  attack(note, "pointer", `pointer:${event.pointerId}`);
                 }}
-                onPointerUp={() => release(note)}
-                onPointerCancel={() => release(note)}
+                onPointerUp={(event) => release(`pointer:${event.pointerId}`)}
+                onPointerCancel={(event) =>
+                  release(`pointer:${event.pointerId}`)
+                }
+                onLostPointerCapture={(event) =>
+                  release(`pointer:${event.pointerId}`)
+                }
                 style={{
                   left: `${((note.whiteIndex + 1) / whiteKeyboardNotes.length) * 100}%`,
                 }}

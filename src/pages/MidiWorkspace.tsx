@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { MidiPlaybackEngine } from "../audio/midi-player";
-import type { KeyboardNote } from "../audio/keyboard";
+import {
+  keyboardNotes,
+  midiToName,
+  displayPerformanceKey,
+  type KeyboardNote,
+} from "../audio/keyboard";
 import { ScoreTimeline } from "../components/ScoreTimeline";
 import { VirtualKeyboard } from "../components/VirtualKeyboard";
 import { localDB, migrateLocal, type LocalPiece } from "../lib/local-db";
 import { api, json, errorText } from "../lib/api";
 import { saveToCloud } from "../lib/cloud";
 import { PracticeClock } from "../features/practice/session";
+import { StepPractice } from "../features/practice/step";
+import { useScorePosition } from "../features/practice/use-score-position";
 import { Modal, Notice } from "../components/ui";
 import { publicationLabels, type PieceSummary } from "../../shared/contracts";
 import { createDemoSong } from "../midi/demo-song";
@@ -60,11 +67,27 @@ export function MidiWorkspace() {
     () => song?.tracks.find((track) => !track.percussion)?.id || null,
   );
   const [mode, setMode] = useState<PlaybackMode>("listen");
+  const [showHints, setShowHints] = useState(true);
+  const [settingsReady, setSettingsReady] = useState(false);
+  const stepEngine = useRef(new StepPractice());
+  const [stepState, setStepState] = useState(stepEngine.current.snapshot);
+  const [stepResult, setStepResult] = useState<{
+    matched: number;
+    skipped: number;
+    activeMs: number;
+  } | null>(null);
+  const roundBaseline = useRef(0);
+  const stepRoundEnded = useRef(false);
+  const running = useRef(false);
+  const saving = useRef(false);
+  const [savingSession, setSavingSession] = useState(false);
+  const [stopSignal, setStopSignal] = useState(0);
   const [keyMode, setKeyMode] = useState<KeyMode>("movable");
   const [tonic, setTonic] = useState(song?.inferredKey || "C");
   const [speed, setSpeed] = useState(1);
   const [position, setPosition] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const visualPosition = useScorePosition(position, mode === "step" && playing);
   const [loop, setLoop] = useState(false);
   const [feedback, setFeedback] = useState(
     "选择音轨后开始播放；简谱会沿中央播放线流动。",
@@ -192,33 +215,74 @@ export function MidiWorkspace() {
         setKeyMode(saved.keyMode || "movable");
         setLoop(Boolean(saved.loop));
         setKeyboardOpen(saved.keyboardOpen !== false);
+        if (["listen", "practice", "step"].includes(saved.mode))
+          setMode(saved.mode);
+        setShowHints(saved.showHints !== false);
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setSettingsReady(true);
+      });
     return () => {
       active = false;
     };
   }, [pieceId]);
 
   useEffect(() => {
-    if (!song) return;
-    const timer = setTimeout(() => {
-      void localDB
-        .setSetting("workspace:" + pieceId, {
-          speed,
-          keyMode,
-          loop,
-          keyboardOpen,
-        })
-        .catch(() => undefined);
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [song, pieceId, speed, keyMode, loop, keyboardOpen]);
+    if (!song || !settingsReady) return;
+    void localDB
+      .setSetting("workspace:" + pieceId, {
+        speed,
+        keyMode,
+        loop,
+        keyboardOpen,
+        mode,
+        showHints,
+      })
+      .catch(() => undefined);
+  }, [
+    song,
+    settingsReady,
+    pieceId,
+    speed,
+    keyMode,
+    loop,
+    keyboardOpen,
+    mode,
+    showHints,
+  ]);
+
+  useEffect(() => {
+    stepEngine.current = new StepPractice(
+      song?.tracks.find((track) => track.id === practiceTrack),
+    );
+    setStepState(stepEngine.current.snapshot);
+    setStepResult(null);
+    stepRoundEnded.current = false;
+    roundBaseline.current = clock.current.activeMs();
+    if (mode === "step") {
+      const at = stepEngine.current.snapshot.group?.startSeconds || 0;
+      positionRef.current = at;
+      setPosition(at);
+      setFeedback("逐音跟练：弹齐当前目标后前进，不考核节奏与时值。");
+    }
+  }, [song, practiceTrack, mode]);
 
   async function finishPractice() {
+    if (saving.current) return false;
     pausePlayback();
+    if (
+      mode === "step" &&
+      clock.current.started &&
+      !stepEngine.current.snapshot.complete
+    )
+      showStepResult();
+    if (mode === "step") stepRoundEnded.current = true;
     const session = pendingSave.current || clock.current.finish();
     setSessionStarted(false);
-    if (!session) return;
+    if (!session) return true;
+    saving.current = true;
+    setSavingSession(true);
     pendingSave.current = session;
     try {
       await localDB.saveSession(session);
@@ -226,22 +290,84 @@ export function MidiWorkspace() {
       setFeedback(
         `本次练习 ${Math.floor(session.activeMs / 1000)} 秒，已保存在本机练习记录。`,
       );
+      return true;
     } catch (error) {
       setFeedback(errorText(error) + "，点击结束练习可重试保存。");
       setSessionStarted(true);
+      return false;
+    } finally {
+      saving.current = false;
+      setSavingSession(false);
     }
+  }
+
+  function showStepResult() {
+    const state = stepEngine.current.snapshot;
+    setStepResult({
+      matched: state.matched,
+      skipped: state.skipped,
+      activeMs: clock.current.activeMs() - roundBaseline.current,
+    });
+  }
+
+  function syncStep() {
+    let state = stepEngine.current.snapshot;
+    if (state.complete) {
+      showStepResult();
+      if (loop && state.total) {
+        stepEngine.current.seek(0);
+        roundBaseline.current = clock.current.activeMs();
+        state = stepEngine.current.snapshot;
+        setFeedback("本轮完成，继续下一轮。需要重新按下目标琴键。");
+      } else {
+        void finishPractice();
+      }
+    }
+    setStepState(state);
+    const at = state.group?.startSeconds ?? song?.durationSeconds ?? 0;
+    positionRef.current = at;
+    setPosition(at);
+  }
+
+  async function changeMode(next: PlaybackMode) {
+    if (next === mode || saving.current) return;
+    if (
+      (clock.current.started || pendingSave.current) &&
+      !(await finishPractice())
+    )
+      return;
+    pausePlayback();
+    setMode(next);
+  }
+
+  async function changePracticeTrack(id: string) {
+    if (id === practiceTrack || saving.current) return;
+    if (
+      (clock.current.started || pendingSave.current) &&
+      !(await finishPractice())
+    )
+      return;
+    pausePlayback();
+    setPracticeTrack(id);
   }
 
   const effectiveTracks = useMemo(() => {
     if (!song) return [];
     return song.tracks.filter(
       (track) =>
-        selectedTracks.includes(track.id) &&
-        (!soloTrack || track.id === soloTrack),
+        (mode === "step" && track.id === practiceTrack) ||
+        (selectedTracks.includes(track.id) &&
+          (!soloTrack || track.id === soloTrack)),
     );
-  }, [song, selectedTracks, soloTrack]);
+  }, [song, selectedTracks, soloTrack, mode, practiceTrack]);
 
   const highlightedNotes = useMemo(() => {
+    if (mode === "step")
+      return new Set(
+        showHints
+          ? stepState.group?.pitches.filter((midi) => !stepState.hits.has(midi))
+          : [],
+      );
     const notes = new Set<number>();
     effectiveTracks
       .filter((track) => !track.percussion)
@@ -255,10 +381,10 @@ export function MidiWorkspace() {
         }),
       );
     return notes;
-  }, [effectiveTracks, position]);
+  }, [effectiveTracks, position, mode, showHints, stepState]);
 
   function currentPosition(): number {
-    if (!playing) return positionRef.current;
+    if (!running.current || mode === "step") return positionRef.current;
     return (
       anchorRef.current.songTime +
       (engineRef.current.currentTime - anchorRef.current.audioTime) * speed
@@ -288,15 +414,18 @@ export function MidiWorkspace() {
       song?.durationSeconds || 0,
       currentPosition(),
     );
+    running.current = false;
     positionRef.current = nextPosition;
     setPosition(nextPosition);
     setPlaying(false);
+    setStopSignal((value) => value + 1);
     setUserNotes(new Set());
     engineRef.current.stopAll();
     setFeedback(message);
   }
 
   async function startPlayback() {
+    if (saving.current || running.current) return;
     if (pendingSave.current) {
       setFeedback("上一段练习尚未保存，请先点击结束练习重试。");
       return;
@@ -304,6 +433,30 @@ export function MidiWorkspace() {
     if (preparing.current) return;
     if (!song || !effectiveTracks.length) {
       setFeedback("请至少选择一条音轨。");
+      return;
+    }
+    if (mode === "step") {
+      if (!stepEngine.current.groups.length) {
+        setFeedback("当前目标轨没有可练习的音符，请选择另一条非鼓音轨。");
+        return;
+      }
+      engineRef.current.stopAll();
+      if (stepRoundEnded.current || stepEngine.current.snapshot.complete) {
+        stepEngine.current.seek(0);
+        roundBaseline.current = clock.current.activeMs();
+        setStepResult(null);
+      }
+      if (!clock.current.started) roundBaseline.current = 0;
+      stepRoundEnded.current = false;
+      const state = stepEngine.current.snapshot;
+      setStepState(state);
+      positionRef.current = state.group!.startSeconds;
+      setPosition(state.group!.startSeconds);
+      clock.current.start(pieceId, song.title, practiceTrack, "step");
+      running.current = true;
+      setPlaying(true);
+      setSessionStarted(true);
+      setFeedback("等待你的输入：弹齐当前目标后，曲谱会前进。");
       return;
     }
     try {
@@ -323,6 +476,7 @@ export function MidiWorkspace() {
         songTime: startAt,
       };
       setPlaying(true);
+      running.current = true;
       if (mode === "practice") {
         clock.current.start(pieceId, song.title, practiceTrack);
         setSessionStarted(true);
@@ -346,9 +500,10 @@ export function MidiWorkspace() {
   }
 
   useEffect(() => {
-    if (!playing || !song) return;
+    if (!playing || !song || mode === "step") return;
     let frame = 0;
     const schedule = () => {
+      if (!running.current) return;
       const nowPosition = currentPosition();
       const horizon = nowPosition + 0.12 * speed;
       effectiveTracks.forEach((track) => {
@@ -379,6 +534,7 @@ export function MidiWorkspace() {
     const interval = window.setInterval(schedule, 25);
     schedule();
     const animate = () => {
+      if (!running.current) return;
       const next = currentPosition();
       if (next >= song.durationSeconds) {
         if (loop) {
@@ -395,6 +551,8 @@ export function MidiWorkspace() {
           positionRef.current = song.durationSeconds;
           setPosition(song.durationSeconds);
           setPlaying(false);
+          running.current = false;
+          setStopSignal((value) => value + 1);
           clock.current.pause();
           if (clock.current.started) void finishPractice();
           else setFeedback("播放完成。");
@@ -419,10 +577,16 @@ export function MidiWorkspace() {
   }
 
   function seek(next: number) {
-    clock.current.pause();
-    operation.current += 1;
-    if (playing) engineRef.current.stopAll();
-    setPlaying(false);
+    pausePlayback();
+    if (mode === "step") {
+      stepEngine.current.seek(next);
+      stepRoundEnded.current = false;
+      const state = stepEngine.current.snapshot;
+      setStepState(state);
+      setStepResult(null);
+      roundBaseline.current = clock.current.activeMs();
+      next = state.group?.startSeconds ?? song?.durationSeconds ?? next;
+    }
     positionRef.current = next;
     setPosition(next);
     resetIndices(next);
@@ -431,6 +595,21 @@ export function MidiWorkspace() {
 
   function handlePracticeNote(note: KeyboardNote) {
     setUserNotes((items) => new Set(items).add(note.midi));
+    if (mode === "step") {
+      if (!running.current) return;
+      const result = stepEngine.current.press(note.midi);
+      setFeedback(
+        result === "wrong"
+          ? `${midiToName(note.midi)} 不是当前目标音，请再试一次。`
+          : result === "duplicate"
+            ? "这个音已完成，请弹奏本组剩余的音。"
+            : result === "hit"
+              ? "已记住这个音，继续弹齐本组。"
+              : "弹对了，继续下一组。",
+      );
+      syncStep();
+      return;
+    }
     if (mode !== "practice" || !playing || !song || !practiceTrack) return;
     const track = song.tracks.find((item) => item.id === practiceTrack);
     const candidates =
@@ -705,7 +884,11 @@ export function MidiWorkspace() {
             >
               <label>
                 <input
-                  checked={selectedTracks.includes(track.id)}
+                  checked={
+                    (mode === "step" && practiceTrack === track.id) ||
+                    selectedTracks.includes(track.id)
+                  }
+                  disabled={mode === "step" && practiceTrack === track.id}
                   onChange={() =>
                     changeTransport(() =>
                       setSelectedTracks((items) =>
@@ -744,10 +927,8 @@ export function MidiWorkspace() {
                   className={
                     practiceTrack === track.id ? "target active" : "target"
                   }
-                  onClick={() => {
-                    if (clock.current.started) void finishPractice();
-                    changeTransport(() => setPracticeTrack(track.id));
-                  }}
+                  onClick={() => void changePracticeTrack(track.id)}
+                  disabled={savingSession}
                   title="设为跟练目标"
                   type="button"
                 >
@@ -800,8 +981,9 @@ export function MidiWorkspace() {
             <button
               className="transport-play"
               aria-label={
-                playing ? "暂停" : mode === "practice" ? "开始练习" : "开始播放"
+                playing ? "暂停" : mode !== "listen" ? "开始练习" : "开始播放"
               }
+              disabled={savingSession}
               onClick={() => (playing ? pausePlayback() : void startPlayback())}
               type="button"
             >
@@ -818,36 +1000,45 @@ export function MidiWorkspace() {
               value={position}
             />
             <span>{formatTime(song.durationSeconds)}</span>
-            <select
-              aria-label="速度"
-              value={speed}
-              onChange={(event) =>
-                changeTransport(() => setSpeed(Number(event.target.value)))
-              }
-            >
-              {[0.5, 0.75, 1, 1.25, 1.5].map((value) => (
-                <option key={value} value={value}>
-                  {value}×
-                </option>
-              ))}
-            </select>
+            {mode !== "step" && (
+              <select
+                aria-label="速度"
+                value={speed}
+                onChange={(event) =>
+                  changeTransport(() => setSpeed(Number(event.target.value)))
+                }
+              >
+                {[0.5, 0.75, 1, 1.25, 1.5].map((value) => (
+                  <option key={value} value={value}>
+                    {value}×
+                  </option>
+                ))}
+              </select>
+            )}
             <div className="mode-switch">
               <button
                 className={mode === "listen" ? "active" : ""}
-                onClick={() => {
-                  if (clock.current.started) void finishPractice();
-                  changeTransport(() => setMode("listen"));
-                }}
+                onClick={() => void changeMode("listen")}
+                disabled={savingSession}
                 type="button"
               >
                 自动演奏
               </button>
               <button
                 className={mode === "practice" ? "active" : ""}
-                onClick={() => changeTransport(() => setMode("practice"))}
+                onClick={() => void changeMode("practice")}
+                disabled={savingSession}
                 type="button"
               >
                 伴奏跟练
+              </button>
+              <button
+                className={mode === "step" ? "active" : ""}
+                disabled={savingSession}
+                onClick={() => void changeMode("step")}
+                type="button"
+              >
+                逐音跟练
               </button>
             </div>
             <label className="loop-toggle">
@@ -859,14 +1050,110 @@ export function MidiWorkspace() {
               循环
             </label>
             {sessionStarted && (
-              <button onClick={() => void finishPractice()}>结束练习</button>
+              <button
+                disabled={savingSession}
+                onClick={() => void finishPractice()}
+              >
+                结束练习
+              </button>
             )}
           </div>
+
+          {mode === "step" && (
+            <section className="step-panel" aria-label="逐音跟练目标">
+              <div className="step-heading">
+                <div>
+                  <strong>
+                    {stepState.group
+                      ? `第 ${stepState.index + 1} / ${stepState.total} 组`
+                      : stepState.total
+                        ? "本轮完成"
+                        : "暂无目标音符"}
+                  </strong>
+                  <p>弹齐当前目标后前进 · 不考核节奏与时值</p>
+                </div>
+                <button
+                  aria-pressed={!showHints}
+                  onClick={() => setShowHints((value) => !value)}
+                >
+                  {showHints ? "隐藏辅助提示" : "显示辅助提示"}
+                </button>
+              </div>
+              {showHints && stepState.group && (
+                <div className="step-notes">
+                  {stepState.group.pitches.map((midi) => {
+                    const key = keyboardNotes.find(
+                      (note) => note.midi === midi,
+                    );
+                    const hit = stepState.hits.has(midi);
+                    return (
+                      <span
+                        key={midi}
+                        className={hit ? "step-note hit" : "step-note"}
+                      >
+                        <b>{midiToName(midi)}</b>
+                        <small>
+                          {hit
+                            ? "✓ 已完成"
+                            : key
+                              ? `键位 ${displayPerformanceKey(key)}`
+                              : "超出范围"}
+                        </small>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+              {stepState.group?.pitches.some(
+                (midi) => midi < 36 || midi > 96,
+              ) && (
+                <p className="step-range-warning">
+                  本组含有 C2–C7
+                  以外的音，当前键盘无法弹齐。请跳过本组或更换目标轨。
+                </p>
+              )}
+              <div className="step-actions">
+                <span>
+                  {playing ? "等待输入" : "已暂停"} · 本组已完成{" "}
+                  {stepState.hits.size} / {stepState.group?.pitches.length || 0}{" "}
+                  音
+                </span>
+                <button
+                  disabled={!playing || !stepState.group}
+                  onClick={() => {
+                    if (!running.current) return;
+                    stepEngine.current.skip();
+                    setFeedback("已跳过本组，不计为弹对。");
+                    syncStep();
+                  }}
+                >
+                  跳过当前组
+                </button>
+              </div>
+              {stepResult && (
+                <p className="step-result" role="status">
+                  本轮结果：弹对 {stepResult.matched} 组 · 跳过{" "}
+                  {stepResult.skipped} 组 · 练习{" "}
+                  {Math.floor(stepResult.activeMs / 1000)} 秒
+                  {loop && playing ? "；已开始下一轮" : ""}
+                </p>
+              )}
+            </section>
+          )}
 
           <ScoreTimeline
             onSeek={seek}
             keyMode={keyMode}
-            positionSeconds={position}
+            positionSeconds={visualPosition}
+            stepTarget={
+              mode === "step"
+                ? {
+                    trackId: practiceTrack,
+                    startTick: stepState.group?.startTick ?? null,
+                    hits: stepState.hits,
+                  }
+                : undefined
+            }
             song={song}
             tonic={tonic}
             trackIds={effectiveTracks.map((track) => track.id)}
@@ -874,7 +1161,11 @@ export function MidiWorkspace() {
 
           <div className="workspace-feedback">
             <strong>{feedback}</strong>
-            <span>中央竖线是当前节拍 · 绿色键为正在演奏或等待跟练的音</span>
+            <span>
+              {mode === "step"
+                ? "中央竖线是当前目标 · 其他音轨仅供看谱参考，不自动发声"
+                : "中央竖线是当前节拍 · 绿色键为正在演奏或等待跟练的音"}
+            </span>
           </div>
 
           <button
@@ -888,7 +1179,7 @@ export function MidiWorkspace() {
           </button>
           {keyboardOpen && (
             <VirtualKeyboard
-              key={String(playing)}
+              stopSignal={stopSignal}
               disabled={publishOpen || reportOpen}
               activeNotes={userNotes}
               highlightedNotes={highlightedNotes}

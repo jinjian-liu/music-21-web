@@ -14,7 +14,9 @@ Compose 设置 TRUST_PROXY=true 对应信任一跳反向代理，API 必须只�
 
 ## 数据迁移
 
-执行 npm run db:migrate。迁移器使用 advisory lock 防止多个迁移同时运行，并通过 schema_migrations 记录完成版本。旧版迁移没有日志；检测到既有 pieces 表时会将 0001 视为已执行，然后应用 0002。
+执行 npm run db:migrate。迁移器使用 advisory lock 防止多个迁移同时运行，并通过 schema_migrations 记录完成版本。旧版迁移没有日志；检测到既有 pieces 表时会将 0001 视为已执行，然后按顺序应用剩余迁移。
+
+逐音跟练版本新增 0003_step_practice.sql：扩展练习模式约束以接受 step，并限制该模式的 matched/attempted 为空。保留已有 practice 和 single-note 记录、账号、曲目及链接。更新 API 与 Web 前先执行此迁移；未升级的 API／数据库不能接收 step 记录，但本机练习和保存仍可使用。迁移不会自动上传本机记录。
 
 迁移新增字段与表，不删除旧数据，不修改 UUID、slug 或原对象路径。旧 status 映射至独立解析／公开状态，旧处理中任务回到队列。账号密码和 Cookie 会话保持兼容。运行迁移前备份数据库；升级时停止旧 API 与 Worker，避免旧版本覆盖新状态。
 

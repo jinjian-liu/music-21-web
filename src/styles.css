@@ -1566,3 +1566,92 @@ blockquote {
     letter-spacing: 0;
   }
 }
+
+.step-panel {
+  padding: 18px;
+  border: 1px solid #d6e1cf;
+  border-radius: 12px;
+  background: #f3f7ef;
+}
+.step-heading,
+.step-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.step-heading p {
+  margin: 6px 0 0;
+  color: #58654f;
+  font-size: 12px;
+}
+.step-heading button,
+.step-actions button {
+  font-size: 12px;
+}
+.step-notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0;
+}
+.step-note {
+  display: grid;
+  gap: 5px;
+  min-width: 80px;
+  padding: 10px 14px;
+  background: var(--paper);
+  border: 1px solid #c6d4bd;
+  border-radius: 8px;
+}
+.step-note small {
+  font-size: 11px;
+}
+.step-note.hit {
+  color: #245539;
+  background: #dcecd9;
+  border-color: #729866;
+}
+.step-actions {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #58654f;
+}
+.step-result {
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid #c6d4bd;
+  font-size: 13px;
+}
+.step-range-warning {
+  color: #84501e;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.reference-lane {
+  background: #f3f2ed;
+  color: #65705f;
+}
+.jianpu-pitch.step-hit {
+  color: #173c25;
+  background: #dcecd9;
+  border-radius: 4px;
+  position: relative;
+}
+.jianpu-pitch.step-hit::after {
+  content: "✓";
+  position: absolute;
+  left: 100%;
+  top: 6px;
+  font-size: 11px;
+  color: white;
+}
+@media (max-width: 580px) {
+  .step-panel {
+    padding: 12px;
+  }
+  .mode-switch {
+    flex-basis: 100%;
+  }
+}

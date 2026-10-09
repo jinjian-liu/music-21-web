@@ -157,8 +157,8 @@ export function buildJianpu(
         beat: location.beat,
         durationKind: durationKind(endTick - startTick, song.ppq),
         rest: false,
-        pitches: notes
-          .map((note) => pitchToJianpu(note.midi, tonic, mode))
+        pitches: [...new Set(notes.map((note) => note.midi))]
+          .map((midi) => pitchToJianpu(midi, tonic, mode))
           .sort((a, b) => b.midi - a.midi),
       });
       cursor = Math.max(cursor, endTick);

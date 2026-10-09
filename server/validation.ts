@@ -16,7 +16,7 @@ export const sessionSchema = z
     id: z.string().uuid(),
     pieceId: z.string().min(1).max(200),
     title: z.string().min(1).max(160),
-    mode: z.enum(["practice", "single-note"]),
+    mode: z.enum(["practice", "single-note", "step"]),
     targetTrackId: z.string().max(200).nullable(),
     startedAt: z.string().datetime(),
     endedAt: z.string().datetime(),
@@ -31,6 +31,7 @@ export const sessionSchema = z
         new Date(v.endedAt).getTime() -
           new Date(v.startedAt).getTime() +
           1000 &&
+      (v.mode !== "step" || (v.matched === null && v.attempted === null)) &&
       ((v.matched === null && v.attempted === null) ||
         (v.matched !== null &&
           v.attempted !== null &&

@@ -95,7 +95,17 @@ beforeAll(async () => {
       "utf8",
     ),
   );
+  await query(
+    "INSERT INTO practice_sessions(id,user_id,piece_id,title,mode,started_at,ended_at,active_ms,matched,attempted) VALUES(gen_random_uuid(),$1,'legacy','旧练习','single-note',now(),now(),0,1,2)",
+    [u.id],
+  );
   app = await buildApp();
+  await db.exec(
+    await readFile(
+      new URL("./migrations/0003_step_practice.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   cookie = await register("user@example.com");
   adminCookie = await register("admin@example.com");
   await query("UPDATE users SET role='admin' WHERE email='admin@example.com'");
@@ -110,6 +120,13 @@ describe.sequential("API and PostgreSQL lifecycle", () => {
     expect(p.slug).toBe("legacy-slug");
     expect(p.parse_status).toBe("ready");
     expect(p.publication_status).toBe("published");
+    expect(
+      (
+        await query(
+          "SELECT mode,matched,attempted FROM practice_sessions WHERE piece_id='legacy'",
+        )
+      )[0],
+    ).toMatchObject({ mode: "single-note", matched: 1, attempted: 2 });
   });
   it("validates auth, names, logout and cross-origin mutations", async () => {
     expect(
@@ -343,6 +360,56 @@ describe.sequential("API and PostgreSQL lifecycle", () => {
         })
       ).statusCode,
     ).toBe(400);
+  });
+  it("accepts step sessions idempotently alongside old modes and rejects step scores", async () => {
+    const session = {
+      id: crypto.randomUUID(),
+      pieceId: "local-step",
+      title: "逐音",
+      mode: "step",
+      targetTrackId: "melody",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      endedAt: "2026-01-01T00:01:00.000Z",
+      activeMs: 20000,
+      matched: null,
+      attempted: null,
+    };
+    for (let i = 0; i < 2; i++) {
+      expect(
+        (
+          await request("POST", "/api/practice/sessions/batch", {
+            sessions: [session, session],
+          })
+        ).statusCode,
+      ).toBe(200);
+    }
+    const list = (await request("GET", "/api/practice/sessions")).json();
+    expect(list.items.filter((s: any) => s.mode === "step")).toHaveLength(1);
+    expect(list.items.find((s: any) => s.id === session.id)).toMatchObject({
+      mode: "step",
+      matched: null,
+      attempted: null,
+    });
+    expect(list.items.some((s: any) => s.mode === "practice")).toBe(true);
+    expect(
+      (
+        await request("POST", "/api/practice/sessions/batch", {
+          sessions: [
+            { ...session, id: crypto.randomUUID(), matched: 1, attempted: 2 },
+          ],
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await request(
+          "POST",
+          "/api/practice/sessions/batch",
+          { sessions: [session] },
+          "",
+        )
+      ).statusCode,
+    ).toBe(401);
   });
   it("recovers expired parse leases and bounds repeated interruption attempts", async () => {
     await query(

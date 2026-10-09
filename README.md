@@ -78,6 +78,7 @@ npm run test:e2e
 ## 文档
 
 - [实现与产品边界](docs/implementation.md)
+- [逐音跟练使用与规则](docs/step-practice.md)
 - [接口约定](docs/api.md)
 - [部署、迁移与恢复](docs/deployment.md)
 - [验证结果与环境限制](docs/verification.md)

@@ -45,4 +45,10 @@ export class PracticeClock {
   get started() {
     return this.record !== null;
   }
+  activeMs(now = Date.now()) {
+    return (
+      this.elapsed +
+      (this.activeAt === null ? 0 : Math.max(0, now - this.activeAt))
+    );
+  }
 }

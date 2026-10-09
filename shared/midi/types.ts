@@ -9,7 +9,7 @@ export type PieceStatus =
   | "removed"
   | "failed";
 export type KeyMode = "movable" | "fixed";
-export type PlaybackMode = "listen" | "practice";
+export type PlaybackMode = "listen" | "practice" | "step";
 
 export interface TempoEvent {
   ticks: number;

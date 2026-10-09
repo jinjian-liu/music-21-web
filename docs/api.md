@@ -40,7 +40,7 @@
 - GET /practice/sessions：page、pageSize；按开始时间倒序。
 - GET /practice/summary：{ sessions, activeMs }；activeMs 可能是数据库 bigint 字符串，客户端应转为 Number。
 
-PracticeSession 包含 id、pieceId、title、mode=practice|single-note、targetTrackId（可空）、startedAt、endedAt、activeMs、matched 与 attempted（均可空）。后端拒绝负时长、倒置时间、超出会话跨度的有效时长和不一致命中数。
+PracticeSession 包含 id、pieceId、title、mode=practice|single-note|step、targetTrackId（可空）、startedAt、endedAt、activeMs、matched 与 attempted（均可空）。后端拒绝负时长、倒置时间、超出会话跨度的有效时长和不一致命中数。step 表示逐音跟练，matched 与 attempted 必须均为 null；记录有效练习时长，不上传本轮组数作为评分。接口路径与按会话 UUID 去重规则不变。
 
 ## 管理
 

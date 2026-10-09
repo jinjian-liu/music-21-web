@@ -21,8 +21,7 @@ export class PianoEngine {
   private buffers = new Map<number, AudioBuffer>();
   private loading: Promise<void> | null = null;
   private voices = new Map<number, Voice>();
-  private pending = new Set<number>();
-  private canceled = new Set<number>();
+  private pending = new Map<number, symbol>();
   private tone: PianoTone = "grand";
   private volume = 0.72;
   private resonance = 0.34;
@@ -141,10 +140,11 @@ export class PianoEngine {
 
   async attack(midi: number): Promise<void> {
     if (this.voices.has(midi) || this.pending.has(midi)) return;
-    this.pending.add(midi);
-    this.canceled.delete(midi);
+    const token = Symbol();
+    this.pending.set(midi, token);
     try {
       const context = await this.ensureContext();
+      if (this.pending.get(midi) !== token) return;
       const selectedTone = this.tone;
       const gain = context.createGain();
       const filter = context.createBiquadFilter();
@@ -182,7 +182,11 @@ export class PianoEngine {
           sources = this.createElectricVoice(context, midi, gain);
         }
       }
-      if (this.canceled.delete(midi)) return;
+      if (this.pending.get(midi) !== token) {
+        gain.disconnect();
+        filter.disconnect();
+        return;
+      }
       sources.forEach((source) => source.start());
       const releaseSeconds =
         selectedTone === "mellow"
@@ -194,14 +198,14 @@ export class PianoEngine {
               : 1.35;
       this.voices.set(midi, { sources, gain, releaseSeconds });
     } finally {
-      this.pending.delete(midi);
+      if (this.pending.get(midi) === token) this.pending.delete(midi);
     }
   }
 
   release(midi: number, releaseSeconds?: number): void {
+    this.pending.delete(midi);
     const voice = this.voices.get(midi);
     if (!voice || !this.context) {
-      if (this.pending.has(midi)) this.canceled.add(midi);
       return;
     }
     const now = this.context.currentTime;
@@ -217,7 +221,7 @@ export class PianoEngine {
   }
 
   releaseAll(): void {
-    this.pending.forEach((midi) => this.canceled.add(midi));
+    this.pending.clear();
     [...this.voices.keys()].forEach((midi) => this.release(midi, 0.16));
   }
 

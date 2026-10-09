@@ -9,11 +9,16 @@ interface ScoreTimelineProps {
   keyMode: KeyMode;
   tonic: string;
   onSeek?: (seconds: number) => void;
+  stepTarget?: {
+    trackId: string | null;
+    startTick: number | null;
+    hits: Set<number>;
+  };
 }
 
-function Pitch({ pitch }: { pitch: JianpuPitch }) {
+function Pitch({ pitch, hit = false }: { pitch: JianpuPitch; hit?: boolean }) {
   return (
-    <span className="jianpu-pitch">
+    <span className={`jianpu-pitch${hit ? " step-hit" : ""}`}>
       <i>{pitch.octave > 0 ? "•".repeat(Math.min(2, pitch.octave)) : ""}</i>
       <b>
         {pitch.accidental === 1 ? "♯" : pitch.accidental === -1 ? "♭" : ""}
@@ -31,6 +36,7 @@ export function ScoreTimeline({
   keyMode,
   tonic,
   onSeek,
+  stepTarget,
 }: ScoreTimelineProps) {
   const drag = useRef<{ x: number; time: number } | null>(null);
   const tracks = song.tracks.filter((track) => trackIds.includes(track.id));
@@ -79,7 +85,22 @@ export function ScoreTimeline({
       </div>
       {tracks.map((track) => (
         <div
-          className={track.percussion ? "score-lane percussion" : "score-lane"}
+          className={`score-lane${track.percussion ? " percussion" : ""}${stepTarget && track.id !== stepTarget.trackId ? " reference-lane" : ""}`}
+          style={
+            stepTarget && !track.percussion
+              ? {
+                  height: Math.max(
+                    110,
+                    ...(tokenMap.get(track.id) || [])
+                      .filter(
+                        (token) =>
+                          Math.abs(token.startSeconds - positionSeconds) < 7,
+                      )
+                      .map((token) => token.pitches.length * 32 + 65),
+                  ),
+                }
+              : undefined
+          }
           key={track.id}
         >
           <strong className="score-track-name">{track.name}</strong>
@@ -91,6 +112,7 @@ export function ScoreTimeline({
                 .map((note) => {
                   const delta = note.startSeconds - positionSeconds;
                   const current =
+                    !stepTarget &&
                     positionSeconds >= note.startSeconds &&
                     positionSeconds <=
                       note.startSeconds + Math.max(0.1, note.durationSeconds);
@@ -109,15 +131,21 @@ export function ScoreTimeline({
                 })
             : (tokenMap.get(track.id) || [])
                 .filter(
-                  (token) => Math.abs(token.startSeconds - positionSeconds) < 7,
+                  (token) =>
+                    Math.abs(token.startSeconds - positionSeconds) < 7 ||
+                    (stepTarget?.trackId === track.id &&
+                      stepTarget.startTick === token.startTick),
                 )
                 .map((token) => {
                   const delta = token.startSeconds - positionSeconds;
-                  const current =
-                    positionSeconds >= token.startSeconds &&
-                    positionSeconds <
-                      token.startSeconds +
-                        Math.max(0.08, token.durationSeconds);
+                  const current = stepTarget
+                    ? track.id === stepTarget.trackId &&
+                      !token.rest &&
+                      token.startTick === stepTarget.startTick
+                    : positionSeconds >= token.startSeconds &&
+                      positionSeconds <
+                        token.startSeconds +
+                          Math.max(0.08, token.durationSeconds);
                   return (
                     <span
                       className={`jianpu-token ${token.durationKind}${current ? " current" : ""}${token.rest ? " rest" : ""}`}
@@ -131,7 +159,15 @@ export function ScoreTimeline({
                         <b>0</b>
                       ) : (
                         token.pitches.map((pitch) => (
-                          <Pitch key={pitch.midi} pitch={pitch} />
+                          <Pitch
+                            key={pitch.midi}
+                            pitch={pitch}
+                            hit={
+                              !!stepTarget &&
+                              current &&
+                              stepTarget.hits.has(pitch.midi)
+                            }
+                          />
                         ))
                       )}
                     </span>

@@ -35,7 +35,7 @@ export interface PracticeSession {
   id: string;
   pieceId: string;
   title: string;
-  mode: "practice" | "single-note";
+  mode: "practice" | "single-note" | "step";
   targetTrackId: string | null;
   startedAt: string;
   endedAt: string;
